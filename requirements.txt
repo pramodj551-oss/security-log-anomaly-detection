@@ -4,7 +4,7 @@
 # GitHub: pramodj551-oss
 # ══════════════════════════════════════════════════════════════════
 
-# Install करण्यासाठी:
+# Install :
 #   pip install -r requirements.txt
 
 # ── Web Dashboard ─────────────────────────────────────────────────
@@ -35,6 +35,9 @@ flask-cors==4.0.1
 gunicorn==22.0.0
 
 # ── Utilities ─────────────────────────────────────────────────────
+requests==2.32.3
+python-dotenv==1.0.1
+tqdm==4.66.4# ── Utilities ─────────────────────────────────────────────────────
 requests==2.32.3
 python-dotenv==1.0.1
 tqdm==4.66.4
