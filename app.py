@@ -3,7 +3,7 @@ SOC Dashboard — Security Log Anomaly Detection
 ================================================
 Author  : Pramod Prakash Jadhav
 GitHub  : https://github.com/pramodj551-oss
-LinkedIn: https://linkedin.com/in/pramod-jadhav-42ba2281
+LinkedIn: https://www.linkedin.com/in/pramod-prakash-jadhav-42ba2281
 Built as part of Applied AI & ML Essentials — IIT Patna (Vishlesan i-Hub)
 """
 
@@ -116,7 +116,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**👤 Pramod Prakash Jadhav**")
     st.markdown("🎓 IIT Patna — Applied AI & ML")
-    st.markdown("[GitHub](https://github.com/pramodj551-oss) | [LinkedIn](https://linkedin.com/in/pramod-jadhav-42ba2281)")
+    st.markdown("[GitHub](https://github.com/pramodj551-oss) | [LinkedIn](https://www.linkedin.com/in/pramod-prakash-jadhav-42ba2281)")
 
 df = run_detection(contamination, n_estimators)
 
