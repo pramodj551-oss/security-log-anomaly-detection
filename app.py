@@ -1,359 +1,254 @@
 """
-Security Log Anomaly Detection
-================================
+SOC Dashboard — Security Log Anomaly Detection
+================================================
 Author  : Pramod Prakash Jadhav
-GitHub  : github.com/pramodj551-oss
-LinkedIn: linkedin.com/in/pramod-jadhav-42ba2281
+GitHub  : https://github.com/pramodj551-oss
+LinkedIn: https://linkedin.com/in/pramod-jadhav-42ba2281
 
-Uses Isolation Forest (unsupervised ML) to detect suspicious
-login patterns in enterprise access-control logs.
-
-Real-world impact:
-- Detected 12 suspicious login events from 50,000+ logs/month
-- Reduced manual SOC review time by 40%
+Run: streamlit run soc_dashboard.py
 """
-import numpy as np
+
+import os
+import warnings
 import pandas as pd
-import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense, Dropout, BatchNormalization
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
-import matplotlib.pyplot as plt
+import numpy as np
+import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
 
-# ══════════════════════════════════════════════
-# STEP 1: डेटा तयार करणे (Feature Engineering)
-# ══════════════════════════════════════════════
+warnings.filterwarnings("ignore")
 
-def prepare_login_features(df):
-    """
-    Login डेटामधून महत्त्वाचे features काढणे
-    """
-    features = pd.DataFrame()
-    
-    # वेळेशी संबंधित features
-    features['hour_of_day'] = df['timestamp'].dt.hour
-    features['day_of_week'] = df['timestamp'].dt.dayofweek
-    features['is_weekend'] = (features['day_of_week'] >= 5).astype(int)
-    features['is_night'] = ((features['hour_of_day'] < 6) | 
-                             (features['hour_of_day'] > 22)).astype(int)
-    
-    # Login behavior features
-    features['failed_attempts'] = df['failed_attempts']
-    features['login_frequency'] = df['login_frequency']  # प्रति तास
-    features['session_duration'] = df['session_duration']  # मिनिटांत
-    
-    # Network features
-    features['is_new_ip'] = df['is_new_ip'].astype(int)
-    features['is_new_device'] = df['is_new_device'].astype(int)
-    features['geo_anomaly'] = df['geo_anomaly'].astype(int)  # नवीन देश/शहर
-    
-    return features
+# ── Page Config ──────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="SOC Anomaly Dashboard",
+    page_icon="🔐",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# ══════════════════════════════════════════════
-# STEP 2: Autoencoder Model तयार करणे
-# ══════════════════════════════════════════════
+# ── CSS ──────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+    .main { background-color: #0e1117; }
+    .metric-card {
+        background: #1e2130; border-radius: 10px;
+        padding: 16px 20px; margin: 6px 0;
+    }
+    .critical { border-left: 4px solid #ff4b4b; }
+    .high     { border-left: 4px solid #ffa500; }
+    .medium   { border-left: 4px solid #ffd700; }
+    .normal   { border-left: 4px solid #00cc88; }
+    h1 { color: #00cc88 !important; }
+</style>
+""", unsafe_allow_html=True)
 
-def build_autoencoder(input_dim, encoding_dim=8):
-    """
-    Stacked Autoencoder Architecture
-    IIT Patna - Deep Learning Module नुसार
-    """
-    # --- Encoder ---
-    input_layer = Input(shape=(input_dim,), name='input')
-    
-    x = Dense(64, activation='relu', name='enc_1')(input_layer)
-    x = BatchNormalization(name='bn_1')(x)          # Training stable करण्यासाठी
-    x = Dropout(0.2, name='drop_1')(x)              # Overfitting टाळण्यासाठी
-    
-    x = Dense(32, activation='relu', name='enc_2')(x)
-    x = BatchNormalization(name='bn_2')(x)
-    
-    # Bottleneck Layer — येथे compressed representation तयार होते
-    bottleneck = Dense(encoding_dim, activation='relu', name='bottleneck')(x)
-    
-    # --- Decoder (Mirror of Encoder) ---
-    x = Dense(32, activation='relu', name='dec_1')(bottleneck)
-    x = BatchNormalization(name='bn_3')(x)
-    
-    x = Dense(64, activation='relu', name='dec_2')(x)
-    x = Dropout(0.2, name='drop_2')(x)
-    
-    # Output — sigmoid कारण features 0-1 range मध्ये normalize केलेले आहेत
-    output_layer = Dense(input_dim, activation='sigmoid', name='output')(x)
-    
-    # Model compile
-    autoencoder = Model(inputs=input_layer, outputs=output_layer, 
-                        name='LoginAnomalyDetector')
-    autoencoder.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-        loss='mse',
-        metrics=['mae']
-    )
-    
-    return autoencoder
+# ── Constants ─────────────────────────────────────────────────────────────
+FEATURE_COLS = [
+    "login_attempts", "unique_ips", "off_hours",
+    "failed_auths", "data_volume_mb", "session_duration_min",
+]
+SEV_COLOR = {
+    "CRITICAL": "#ff4b4b",
+    "HIGH":     "#ffa500",
+    "MEDIUM":   "#ffd700",
+    "LOW":      "#64b5f6",
+    "NORMAL":   "#00cc88",
+}
 
-# ══════════════════════════════════════════════
-# STEP 3: Training — फक्त Normal Data वर
-# ══════════════════════════════════════════════
 
-def train_autoencoder(X_normal):
-    """
-    महत्त्वाचे: फक्त Normal login data वर train करणे
-    Anomaly data train मध्ये असता कामा नये!
-    """
-    # Normalization (0 ते 1 range)
-    scaler = MinMaxScaler()
-    X_scaled = scaler.fit_transform(X_normal)
-    
-    # Train-Validation split
-    X_train, X_val = train_test_split(X_scaled, test_size=0.15, random_state=42)
-    
-    # Model तयार करणे
-    model = build_autoencoder(input_dim=X_train.shape[1], encoding_dim=8)
-    model.summary()  # Architecture पाहण्यासाठी
-    
-    # Callbacks — Training Smart बनवण्यासाठी
-    callbacks = [
-        # Validation loss सुधारत नसेल तर थांबणे
-        EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
-        # सर्वोत्तम model save करणे
-        ModelCheckpoint('best_autoencoder.keras', save_best_only=True)
-    ]
-    
-    # Training
-    history = model.fit(
-        X_train, X_train,           # Input = Output (self-supervised!)
-        validation_data=(X_val, X_val),
-        epochs=100,
-        batch_size=32,
-        callbacks=callbacks,
-        verbose=1
-    )
-    
-    return model, scaler, history
+# ── Data & Model ─────────────────────────────────────────────────────────
+@st.cache_data
+def load_and_detect(contamination: float, n_estimators: int):
+    data_path = "data/sample_logs.csv"
+    if not os.path.exists(data_path):
+        st.error("❌ data/sample_logs.csv not found. Run `python3 generate_data.py` first.")
+        st.stop()
 
-# ══════════════════════════════════════════════
-# STEP 4: Threshold ठरवणे आणि Anomaly Detection
-# ══════════════════════════════════════════════
+    df = pd.read_csv(data_path)
 
-def detect_anomalies(model, scaler, X_test, percentile=95):
-    """
-    Reconstruction Error वर आधारित Anomaly Detection
-    
-    percentile=95 म्हणजे: 95% normal logins च्या वरील error = Anomaly
-    """
-    # Test data normalize करणे
-    X_test_scaled = scaler.transform(X_test)
-    
-    # Reconstruction करणे
-    X_reconstructed = model.predict(X_test_scaled)
-    
-    # Reconstruction Error (MSE) प्रत्येक login साठी
-    reconstruction_errors = np.mean(
-        np.power(X_test_scaled - X_reconstructed, 2), 
-        axis=1
-    )
-    
-    # Threshold — Normal data च्या distribution वरून ठरवणे
-    threshold = np.percentile(reconstruction_errors, percentile)
-    
-    # Anomaly Flag
-    predictions = (reconstruction_errors > threshold).astype(int)
-    # 0 = Normal, 1 = Anomaly
-    
-    return predictions, reconstruction_errors, threshold
-
-# ══════════════════════════════════════════════
-# STEP 5: Results Visualize करणे
-# ══════════════════════════════════════════════
-
-def plot_results(history, reconstruction_errors, threshold):
-    
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # Training Loss
-    axes[0].plot(history.history['loss'], label='Training Loss', color='blue')
-    axes[0].plot(history.history['val_loss'], label='Validation Loss', color='orange')
-    axes[0].set_title('Autoencoder Training Progress\n(IIT Patna - Login Anomaly Project)')
-    axes[0].set_xlabel('Epochs')
-    axes[0].set_ylabel('MSE Loss')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-    
-    # Reconstruction Error Distribution
-    axes[1].hist(reconstruction_errors, bins=50, color='steelblue', 
-                 alpha=0.7, label='Reconstruction Error')
-    axes[1].axvline(threshold, color='red', linestyle='--', 
-                    linewidth=2, label=f'Threshold = {threshold:.4f}')
-    axes[1].set_title('Anomaly Detection — Error Distribution')
-    axes[1].set_xlabel('Reconstruction Error (MSE)')
-    axes[1].set_ylabel('Login Count')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig('anomaly_detection_results.png', dpi=150, bbox_inches='tight')
-    plt.show()
-    print("✅ Graph saved: anomaly_detection_results.png")
-
-# ══════════════════════════════════════════════
-# MAIN — सर्व एकत्र चालवणे
-# ══════════════════════════════════════════════
-
-if __name__ == "__main__":
-    
-    # तुमचा data load करा
-    # df = pd.read_csv('login_data.csv')
-    # df['timestamp'] = pd.to_datetime(df['timestamp'])
-    
-    # Feature preparation
-    # X = prepare_login_features(df)
-    # X_normal = X[df['label'] == 'normal']  # फक्त normal data
-    
-    print("🔷 Step 1: Autoencoder Training सुरू...")
-    model, scaler, history = train_autoencoder(X_normal)
-    
-    print("\n🔷 Step 2: Anomaly Detection...")
-    predictions, errors, threshold = detect_anomalies(model, scaler, X_test)
-    
-    anomaly_count = predictions.sum()
-    print(f"\n📊 परिणाम:")
-    print(f"   एकूण Logins: {len(predictions)}")
-    print(f"   Anomalies सापडल्या: {anomaly_count}")
-    print(f"   Anomaly Rate: {anomaly_count/len(predictions)*100:.2f}%")
-    print(f"   Threshold (MSE): {threshold:.6f}")
-    
-    print("\n🔷 Step 3: Results Visualize करत आहे...")
-    plot_results(history, errors, threshold)
-    
-    print("\n✅ Model save करत आहे...")
-    model.save('login_anomaly_autoencoder.keras')
-    print("💾 Model saved: login_anomaly_autoencoder.keras")
-        df["unique_ips"]     * 0.2 +
-        df["off_hours"]      * 0.2 +
-        df["failed_auths"]   * 0.2 +
-        df["attempt_ip_ratio"] * 0.1
+    # Feature engineering
+    df["attempt_ip_ratio"] = df["login_attempts"] / (df["unique_ips"] + 1)
+    df["failure_rate"]     = df["failed_auths"]   / (df["login_attempts"] + 1)
+    df["risk_score"]       = (
+        df["login_attempts"] * 0.30 +
+        df["failed_auths"]   * 0.35 +
+        df["unique_ips"]     * 0.20 +
+        df["off_hours"]      * 0.15
     )
 
-    return df
-
-
-# ── MODEL ────────────────────────────────────────────────
-def train_isolation_forest(X):
-    """
-    Train Isolation Forest on feature matrix.
-    Returns fitted model and scaler.
-    """
-    scaler = StandardScaler()
+    all_feats = FEATURE_COLS + ["attempt_ip_ratio", "failure_rate", "risk_score"]
+    X = df[all_feats].fillna(0)
+    scaler   = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    model = IsolationForest(
-        contamination=CONTAMINATION,
-        random_state=RANDOM_STATE,
-        n_estimators=200,
-        max_samples="auto"
+    model               = IsolationForest(
+        n_estimators=n_estimators, contamination=contamination, random_state=42
     )
-    model.fit(X_scaled)
-    return model, scaler
+    df["anomaly_flag"]  = model.fit_predict(X_scaled)
+    df["anomaly_score"] = model.decision_function(X_scaled)
+    df["is_anomaly"]    = df["anomaly_flag"] == -1
 
+    def severity(row):
+        if not row["is_anomaly"]:
+            return "NORMAL"
+        s = row["anomaly_score"]
+        if s <= -0.155: return "CRITICAL"
+        if s <= -0.12:  return "HIGH"
+        if s <= -0.05:  return "MEDIUM"
+        return "LOW"
 
-# ── DETECTION ────────────────────────────────────────────
-def detect_anomalies(df, model, scaler, feature_cols):
-    """
-    Predict anomalies. Returns DataFrame with results.
-    -1 = ANOMALY | 1 = NORMAL
-    """
-    X = df[feature_cols].values
-    X_scaled = scaler.transform(X)
-
-    df = df.copy()
-    df["anomaly_label"]  = model.predict(X_scaled)
-    df["anomaly_score"]  = -model.score_samples(X_scaled)   # Higher = more anomalous
-    df["is_anomaly"]     = df["anomaly_label"] == -1
-    df["severity"]       = df["anomaly_score"].apply(
-        lambda s: "CRITICAL" if s > 0.6 else ("HIGH" if s > 0.45 else "MEDIUM")
-    )
-
+    df["severity"] = df.apply(severity, axis=1)
     return df
 
 
-# ── REPORT ───────────────────────────────────────────────
-def generate_report(df):
-    """
-    Print summary and save JSON report.
-    """
-    anomalies = df[df["is_anomaly"]]
-    normal    = df[~df["is_anomaly"]]
+# ── Sidebar ──────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.image("https://img.shields.io/badge/SOC-Dashboard-00cc88?style=for-the-badge&logo=shield&logoColor=white")
+    st.markdown("## ⚙️ Model Parameters")
 
-    print("\n" + "="*55)
-    print("  SECURITY LOG ANOMALY DETECTION — REPORT")
-    print("="*55)
-    print(f"  Total logs analysed : {len(df)}")
-    print(f"  Normal events       : {len(normal)}")
-    print(f"  Anomalies detected  : {len(anomalies)}")
-    print(f"  Detection rate      : {len(anomalies)/len(df)*100:.1f}%")
-    print("="*55)
+    contamination = st.slider(
+        "Contamination (Expected Anomaly %)",
+        min_value=0.01, max_value=0.15, value=0.06, step=0.01,
+        help="Expected proportion of anomalies in data"
+    )
+    n_estimators = st.slider(
+        "Number of Trees", min_value=50, max_value=500, value=200, step=50
+    )
 
-    if len(anomalies) > 0:
-        print("\n  TOP SUSPICIOUS EVENTS:\n")
-        top = anomalies.sort_values("anomaly_score", ascending=False).head(10)
-        for _, row in top.iterrows():
-            print(f"  [{row['severity']:8s}] User: {row['user_id']} | "
-                  f"Attempts: {int(row['login_attempts']):3d} | "
-                  f"IPs: {int(row['unique_ips']):2d} | "
-                  f"Off-hours: {'YES' if row['off_hours'] else 'NO ':3s} | "
-                  f"Score: {row['anomaly_score']:.3f}")
-    print("\n" + "="*55)
+    severity_filter = st.multiselect(
+        "Filter by Severity",
+        options=["CRITICAL", "HIGH", "MEDIUM", "LOW", "NORMAL"],
+        default=["CRITICAL", "HIGH", "MEDIUM"],
+    )
 
-    # Save JSON report
-    os.makedirs("results", exist_ok=True)
-    report = {
-        "generated_at":     datetime.now().isoformat(),
-        "total_logs":       len(df),
-        "anomalies_found":  len(anomalies),
-        "detection_rate":   round(len(anomalies)/len(df)*100, 2),
-        "anomalies": anomalies[[
-            "user_id","login_attempts","unique_ips",
-            "off_hours","failed_auths","anomaly_score","severity"
-        ]].to_dict(orient="records")
+    st.markdown("---")
+    st.markdown("**👤 Author:** Pramod Prakash Jadhav")
+    st.markdown("**🎓** IIT Patna — Applied AI & ML")
+    st.markdown("[GitHub](https://github.com/pramodj551-oss) | [LinkedIn](https://linkedin.com/in/pramod-jadhav-42ba2281)")
+
+
+# ── Load Data ─────────────────────────────────────────────────────────────
+df = load_and_detect(contamination, n_estimators)
+
+# ── Header ────────────────────────────────────────────────────────────────
+st.title("🔐 Security Log Anomaly Detection — SOC Dashboard")
+st.caption("Unsupervised ML (Isolation Forest) | Real-time access-log analysis | IIT Patna Applied AI & ML")
+
+# ── KPI Row ───────────────────────────────────────────────────────────────
+total      = len(df)
+anomalies  = df["is_anomaly"].sum()
+critical_n = (df["severity"] == "CRITICAL").sum()
+high_n     = (df["severity"] == "HIGH").sum()
+fp_rate    = f"{(1 - anomalies/total)*100:.1f}%"
+
+col1, col2, col3, col4, col5 = st.columns(5)
+col1.metric("📋 Total Logs",    f"{total:,}")
+col2.metric("🚨 Anomalies",     int(anomalies),  delta=f"{anomalies/total*100:.1f}%")
+col3.metric("🔴 Critical",      int(critical_n))
+col4.metric("🟠 High",          int(high_n))
+col5.metric("✅ Normal Rate",   fp_rate)
+
+st.divider()
+
+# ── Charts Row 1 ──────────────────────────────────────────────────────────
+col_a, col_b = st.columns(2)
+
+with col_a:
+    st.subheader("📊 Severity Distribution")
+    sev_counts = df["severity"].value_counts().reset_index()
+    sev_counts.columns = ["Severity", "Count"]
+    order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "NORMAL"]
+    sev_counts["Severity"] = pd.Categorical(sev_counts["Severity"], categories=order, ordered=True)
+    sev_counts = sev_counts.sort_values("Severity")
+    colors = [SEV_COLOR.get(s, "#888") for s in sev_counts["Severity"]]
+    fig1 = px.bar(
+        sev_counts, x="Severity", y="Count",
+        color="Severity", color_discrete_map=SEV_COLOR,
+        template="plotly_dark"
+    )
+    fig1.update_layout(showlegend=False, margin=dict(t=20, b=20))
+    st.plotly_chart(fig1, use_container_width=True)
+
+with col_b:
+    st.subheader("🎯 Anomaly Score Distribution")
+    fig2 = px.histogram(
+        df, x="anomaly_score", color="is_anomaly",
+        color_discrete_map={True: "#ff4b4b", False: "#00cc88"},
+        nbins=40, template="plotly_dark",
+        labels={"anomaly_score": "Anomaly Score", "is_anomaly": "Is Anomaly"},
+    )
+    fig2.update_layout(margin=dict(t=20, b=20))
+    st.plotly_chart(fig2, use_container_width=True)
+
+# ── Charts Row 2 ──────────────────────────────────────────────────────────
+col_c, col_d = st.columns(2)
+
+with col_c:
+    st.subheader("⚡ Risk Score vs Login Attempts")
+    fig3 = px.scatter(
+        df, x="login_attempts", y="risk_score",
+        color="severity", color_discrete_map=SEV_COLOR,
+        size="failed_auths", hover_data=["user_id", "anomaly_score"],
+        template="plotly_dark",
+        labels={"login_attempts": "Login Attempts", "risk_score": "Risk Score"},
+    )
+    fig3.update_layout(margin=dict(t=20, b=20))
+    st.plotly_chart(fig3, use_container_width=True)
+
+with col_d:
+    st.subheader("📈 Failed Auth vs Data Volume")
+    fig4 = px.scatter(
+        df, x="failed_auths", y="data_volume_mb",
+        color="severity", color_discrete_map=SEV_COLOR,
+        hover_data=["user_id", "off_hours"],
+        template="plotly_dark",
+        labels={"failed_auths": "Failed Auths", "data_volume_mb": "Data Volume (MB)"},
+    )
+    fig4.update_layout(margin=dict(t=20, b=20))
+    st.plotly_chart(fig4, use_container_width=True)
+
+# ── Anomaly Table ─────────────────────────────────────────────────────────
+st.divider()
+st.subheader("🚨 Suspicious Events — Detailed View")
+
+filtered = df[df["severity"].isin(severity_filter)].copy()
+filtered = filtered.sort_values("anomaly_score")
+
+display_cols = [
+    "user_id", "timestamp", "severity", "anomaly_score",
+    "login_attempts", "failed_auths", "unique_ips",
+    "off_hours", "data_volume_mb", "risk_score"
+]
+display_cols = [c for c in display_cols if c in filtered.columns]
+
+def color_severity(val):
+    colors_map = {
+        "CRITICAL": "background-color: #3d0000; color: #ff4b4b; font-weight: bold",
+        "HIGH":     "background-color: #3d2000; color: #ffa500; font-weight: bold",
+        "MEDIUM":   "background-color: #3d3300; color: #ffd700",
+        "LOW":      "background-color: #1a2a3a; color: #64b5f6",
+        "NORMAL":   "background-color: #003d1e; color: #00cc88",
     }
-    with open(LOG_FILE, "w") as f:
-        json.dump(report, f, indent=2, default=str)
+    return colors_map.get(val, "")
 
-    print(f"\n  Full report saved → {LOG_FILE}")
-    print("="*55 + "\n")
+st.dataframe(
+    filtered[display_cols].style.applymap(color_severity, subset=["severity"]).format(
+        {"anomaly_score": "{:.3f}", "risk_score": "{:.2f}", "data_volume_mb": "{:.1f}"}
+    ),
+    use_container_width=True,
+    height=400,
+)
 
+# ── Download ──────────────────────────────────────────────────────────────
+st.download_button(
+    label="⬇️ Download Full Results CSV",
+    data=filtered.to_csv(index=False).encode("utf-8"),
+    file_name="anomaly_results.csv",
+    mime="text/csv",
+)
 
-# ── MAIN ────────────────────────────────────────────────
-def main():
-    print("\n[1/4] Generating/loading log data...")
-    df = generate_sample_logs(n=500)
-    print(f"      Loaded {len(df)} log records.")
-
-    print("[2/4] Engineering security features...")
-    df = engineer_features(df)
-    feature_cols = [
-        "login_attempts", "unique_ips", "off_hours",
-        "failed_auths", "attempt_ip_ratio",
-        "failure_rate", "risk_score", "data_accessed_mb"
-    ]
-
-    print("[3/4] Training Isolation Forest model...")
-    model, scaler = train_isolation_forest(df[feature_cols])
-    print(f"      Model trained | Contamination={CONTAMINATION} | Trees=200")
-
-    print("[4/4] Running anomaly detection...")
-    df = detect_anomalies(df, model, scaler, feature_cols)
-
-    generate_report(df)
-
-    # Save full results CSV
-    os.makedirs("results", exist_ok=True)
-    df.to_csv("results/full_results.csv", index=False)
-    print("  Full results saved → results/full_results.csv\n")
-
-
-if __name__ == "__main__":
-    main()
+# ── Footer ────────────────────────────────────────────────────────────────
+st.divider()
+st.caption("Built by Pramod Prakash Jadhav · Applied AI & ML Essentials · IIT Patna (Vishlesan i-Hub) · github.com/pramodj551-oss")
