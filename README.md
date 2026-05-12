@@ -9,8 +9,8 @@
 
 **Author:** Pramod Prakash Jadhav
 **GitHub:** [github.com/pramodj551-oss](https://github.com/pramodj551-oss)
-**LinkedIn:** [linkedin.com/in/pramod-jadhav-42ba2281](https://linkedin.com/in/pramod-jadhav-42ba2281)
-**Portfolio:** [portfolio-eta-ashen-pxpaf816ec.vercel.app](https://portfolio-eta-ashen-pxpaf816ec.vercel.app)
+**LinkedIn:** [linkedin.com/in/pramod-prakash-jadhav-42ba2281](https://www.linkedin.com/in/pramod-prakash-jadhav-42ba2281)
+**Portfolio:** [[pramodjadhav.vercel.app](https://pramodjadhav.vercel.app)
 
 ---
 
@@ -333,4 +333,4 @@ MIT License — see [LICENSE](LICENSE)
 
 ---
 
-*Part of my AI Security portfolio — [portfolio-eta-ashen-pxpaf816ec.vercel.app](https://portfolio-eta-ashen-pxpaf816ec.vercel.app)*
+*Part of my AI Security portfolio — [pramodjadhav.vercel.app](https://pramodjadhav.vercel.app)*
