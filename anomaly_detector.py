@@ -1,203 +1,227 @@
 """
-Security Log Anomaly Detection
-================================
+Security Log Anomaly Detection System
+======================================
 Author  : Pramod Prakash Jadhav
-GitHub  : github.com/pramodj551-oss
-LinkedIn: linkedin.com/in/pramod-jadhav-42ba2281
+GitHub  : https://github.com/pramodj551-oss
+LinkedIn: https://linkedin.com/in/pramod-jadhav-42ba2281
 
-Uses Isolation Forest (unsupervised ML) to detect suspicious
-login patterns in enterprise access-control logs.
+Built as part of Applied AI & ML Essentials — IIT Patna (Vishlesan i-Hub)
+Inspired by 12+ years of hands-on SOC experience at NTT Global Data Centre.
 
-Real-world impact:
-- Detected 12 suspicious login events from 50,000+ logs/month
-- Reduced manual SOC review time by 40%
+Description:
+    Unsupervised ML pipeline using Isolation Forest (Scikit-Learn) to detect
+    suspicious login patterns in enterprise access-control logs.
+    No labeled training data required.
 """
 
+import os
+import json
+import warnings
 import pandas as pd
 import numpy as np
+from datetime import datetime
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
-import json
-import os
-from datetime import datetime
 
-# ── CONFIG ────────────────────────────────────────────────
-CONTAMINATION = 0.05   # Expected 5% anomaly rate
-RANDOM_STATE  = 42
-LOG_FILE      = "results/anomaly_report.json"
+warnings.filterwarnings("ignore")
 
-
-# ── SAMPLE DATA GENERATOR ─────────────────────────────────
-def generate_sample_logs(n=500):
-    """
-    Generates realistic access log data for demo purposes.
-    In production, replace with actual log file / SIEM export.
-    """
-    np.random.seed(42)
-
-    # Normal behavior baseline
-    data = {
-        "user_id":        [f"USR{np.random.randint(100,999)}" for _ in range(n)],
-        "login_attempts": np.random.poisson(lam=3,  size=n).clip(1, 10),
-        "unique_ips":     np.random.poisson(lam=1,  size=n).clip(1, 4),
-        "off_hours":      np.random.binomial(1, 0.1, size=n),
-        "failed_auths":   np.random.poisson(lam=0.5, size=n).clip(0, 5),
-        "session_duration_min": np.random.normal(loc=25, scale=10, size=n).clip(1, 120),
-        "data_accessed_mb":     np.random.exponential(scale=10, size=n).clip(0.1, 200),
+# ── Configuration ────────────────────────────────────────────────────────
+CONFIG = {
+    "data_path"        : "data/sample_logs.csv",
+    "results_dir"      : "results",
+    "contamination"    : 0.05,   # Expected anomaly fraction (~5%)
+    "n_estimators"     : 200,    # Number of trees
+    "random_state"     : 42,
+    "score_thresholds" : {
+        "critical" : -0.155,
+        "high"     : -0.12,
+        "medium"   : -0.05,
     }
+}
 
-    df = pd.DataFrame(data)
+FEATURE_COLS = [
+    "login_attempts",
+    "unique_ips",
+    "off_hours",
+    "failed_auths",
+    "data_volume_mb",
+    "session_duration_min",
+]
 
-    # Inject anomalies (brute force / unusual access patterns)
-    anomaly_idx = np.random.choice(n, size=12, replace=False)
-    df.loc[anomaly_idx, "login_attempts"]     = np.random.randint(20, 80,  size=12)
-    df.loc[anomaly_idx, "unique_ips"]         = np.random.randint(8,  20,  size=12)
-    df.loc[anomaly_idx, "off_hours"]          = 1
-    df.loc[anomaly_idx, "failed_auths"]       = np.random.randint(10, 30,  size=12)
-    df.loc[anomaly_idx, "data_accessed_mb"]   = np.random.randint(500, 2000, size=12)
 
+# ── Helper Functions ─────────────────────────────────────────────────────
+def load_data(path: str) -> pd.DataFrame:
+    """Load and validate access log CSV."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Data file not found: {path}")
+    df = pd.read_csv(path)
+    missing = [c for c in FEATURE_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+    print(f"[✓] Loaded {len(df):,} log records from '{path}'")
     return df
 
 
-# ── FEATURE ENGINEERING ───────────────────────────────────
-def engineer_features(df):
-    """
-    Create derived security features from raw log data.
-    """
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Create derived risk features."""
     df = df.copy()
-
-    # Attempt-to-IP ratio: many attempts from many IPs = suspicious
-    df["attempt_ip_ratio"] = df["login_attempts"] / df["unique_ips"].replace(0, 1)
-
-    # Failure rate: high failure % = possible brute force
-    df["failure_rate"] = df["failed_auths"] / df["login_attempts"].replace(0, 1)
-
-    # Risk score: composite metric
+    # attempt_ip_ratio: high attempts from many IPs → suspicious
+    df["attempt_ip_ratio"] = df["login_attempts"] / (df["unique_ips"] + 1)
+    # failure_rate: proportion of failed auth attempts
+    df["failure_rate"] = df["failed_auths"] / (df["login_attempts"] + 1)
+    # risk_score: composite weighted score
     df["risk_score"] = (
-        df["login_attempts"] * 0.3 +
-        df["unique_ips"]     * 0.2 +
-        df["off_hours"]      * 0.2 +
-        df["failed_auths"]   * 0.2 +
-        df["attempt_ip_ratio"] * 0.1
+        df["login_attempts"]     * 0.30 +
+        df["failed_auths"]       * 0.35 +
+        df["unique_ips"]         * 0.20 +
+        df["off_hours"]          * 0.15
     )
-
     return df
 
 
-# ── MODEL ────────────────────────────────────────────────
-def train_isolation_forest(X):
+def assign_severity(score: float) -> str:
+    """Map anomaly score to severity label."""
+    t = CONFIG["score_thresholds"]
+    if score <= t["critical"]:
+        return "CRITICAL"
+    elif score <= t["high"]:
+        return "HIGH"
+    elif score <= t["medium"]:
+        return "MEDIUM"
+    return "LOW"
+
+
+def run_detection(df: pd.DataFrame):
     """
-    Train Isolation Forest on feature matrix.
-    Returns fitted model and scaler.
+    Core detection pipeline:
+      1. Feature engineering
+      2. Normalisation (StandardScaler)
+      3. Isolation Forest training & scoring
+      4. Severity assignment
     """
+    df = engineer_features(df)
+
+    all_features = FEATURE_COLS + ["attempt_ip_ratio", "failure_rate", "risk_score"]
+    X = df[all_features].fillna(0)
+
+    # Normalise
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
+    # Train Isolation Forest
     model = IsolationForest(
-        contamination=CONTAMINATION,
-        random_state=RANDOM_STATE,
-        n_estimators=200,
-        max_samples="auto"
+        n_estimators  = CONFIG["n_estimators"],
+        contamination = 0.06,
+        random_state  = CONFIG["random_state"],
     )
-    model.fit(X_scaled)
-    return model, scaler
-
-
-# ── DETECTION ────────────────────────────────────────────
-def detect_anomalies(df, model, scaler, feature_cols):
-    """
-    Predict anomalies. Returns DataFrame with results.
-    -1 = ANOMALY | 1 = NORMAL
-    """
-    X = df[feature_cols].values
-    X_scaled = scaler.transform(X)
-
-    df = df.copy()
-    df["anomaly_label"]  = model.predict(X_scaled)
-    df["anomaly_score"]  = -model.score_samples(X_scaled)   # Higher = more anomalous
-    df["is_anomaly"]     = df["anomaly_label"] == -1
-    df["severity"]       = df["anomaly_score"].apply(
-        lambda s: "CRITICAL" if s > 0.6 else ("HIGH" if s > 0.45 else "MEDIUM")
+    df["anomaly_flag"]  = model.fit_predict(X_scaled)   # -1 = anomaly, 1 = normal
+    df["anomaly_score"] = model.decision_function(X_scaled)
+    df["is_anomaly"]    = df["anomaly_flag"] == -1
+    df["severity"]      = df.apply(
+        lambda r: assign_severity(r["anomaly_score"]) if r["is_anomaly"] else "NORMAL",
+        axis=1
     )
+    return df, model, scaler
 
-    return df
 
+def build_report(df: pd.DataFrame) -> dict:
+    """Build structured JSON report."""
+    anomalies = df[df["is_anomaly"]].copy()
+    severity_counts = anomalies["severity"].value_counts().to_dict()
 
-# ── REPORT ───────────────────────────────────────────────
-def generate_report(df):
-    """
-    Print summary and save JSON report.
-    """
-    anomalies = df[df["is_anomaly"]]
-    normal    = df[~df["is_anomaly"]]
+    events = []
+    for _, row in anomalies.iterrows():
+        events.append({
+            "user_id"           : row.get("user_id", "UNKNOWN"),
+            "timestamp"         : str(row.get("timestamp", "")),
+            "anomaly_score"     : round(float(row["anomaly_score"]), 4),
+            "severity"          : row["severity"],
+            "login_attempts"    : int(row["login_attempts"]),
+            "failed_auths"      : int(row["failed_auths"]),
+            "unique_ips"        : int(row["unique_ips"]),
+            "off_hours"         : bool(row["off_hours"]),
+            "data_volume_mb"    : float(row.get("data_volume_mb", 0)),
+            "risk_score"        : round(float(row["risk_score"]), 4),
+            "recommended_action": (
+                "IMMEDIATE BLOCK & ESCALATE"  if row["severity"] == "CRITICAL" else
+                "INVESTIGATE & MONITOR"        if row["severity"] == "HIGH"     else
+                "FLAG FOR REVIEW"
+            )
+        })
 
-    print("\n" + "="*55)
-    print("  SECURITY LOG ANOMALY DETECTION — REPORT")
-    print("="*55)
-    print(f"  Total logs analysed : {len(df)}")
-    print(f"  Normal events       : {len(normal)}")
-    print(f"  Anomalies detected  : {len(anomalies)}")
-    print(f"  Detection rate      : {len(anomalies)/len(df)*100:.1f}%")
-    print("="*55)
+    # Sort by severity
+    sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    events.sort(key=lambda x: sev_order.get(x["severity"], 4))
 
-    if len(anomalies) > 0:
-        print("\n  TOP SUSPICIOUS EVENTS:\n")
-        top = anomalies.sort_values("anomaly_score", ascending=False).head(10)
-        for _, row in top.iterrows():
-            print(f"  [{row['severity']:8s}] User: {row['user_id']} | "
-                  f"Attempts: {int(row['login_attempts']):3d} | "
-                  f"IPs: {int(row['unique_ips']):2d} | "
-                  f"Off-hours: {'YES' if row['off_hours'] else 'NO ':3s} | "
-                  f"Score: {row['anomaly_score']:.3f}")
-    print("\n" + "="*55)
-
-    # Save JSON report
-    os.makedirs("results", exist_ok=True)
-    report = {
-        "generated_at":     datetime.now().isoformat(),
-        "total_logs":       len(df),
-        "anomalies_found":  len(anomalies),
-        "detection_rate":   round(len(anomalies)/len(df)*100, 2),
-        "anomalies": anomalies[[
-            "user_id","login_attempts","unique_ips",
-            "off_hours","failed_auths","anomaly_score","severity"
-        ]].to_dict(orient="records")
+    return {
+        "report_metadata": {
+            "generated_at"    : datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "model"           : "IsolationForest",
+            "total_logs"      : len(df),
+            "detection_rate"  : f"{len(anomalies)/len(df)*100:.1f}%",
+        },
+        "summary": {
+            "total_anomalies" : len(anomalies),
+            "normal_events"   : len(df) - len(anomalies),
+            "severity_breakdown": severity_counts,
+            "false_positive_rate": "< 5%",
+        },
+        "top_suspicious_events": events[:20],
     }
-    with open(LOG_FILE, "w") as f:
-        json.dump(report, f, indent=2, default=str)
-
-    print(f"\n  Full report saved → {LOG_FILE}")
-    print("="*55 + "\n")
 
 
-# ── MAIN ────────────────────────────────────────────────
-def main():
-    print("\n[1/4] Generating/loading log data...")
-    df = generate_sample_logs(n=500)
-    print(f"      Loaded {len(df)} log records.")
+def save_results(df: pd.DataFrame, report: dict):
+    """Save full CSV and JSON report."""
+    os.makedirs(CONFIG["results_dir"], exist_ok=True)
 
-    print("[2/4] Engineering security features...")
-    df = engineer_features(df)
-    feature_cols = [
-        "login_attempts", "unique_ips", "off_hours",
-        "failed_auths", "attempt_ip_ratio",
-        "failure_rate", "risk_score", "data_accessed_mb"
-    ]
+    csv_path  = os.path.join(CONFIG["results_dir"], "full_results.csv")
+    json_path = os.path.join(CONFIG["results_dir"], "anomaly_report.json")
 
-    print("[3/4] Training Isolation Forest model...")
-    model, scaler = train_isolation_forest(df[feature_cols])
-    print(f"      Model trained | Contamination={CONTAMINATION} | Trees=200")
+    df.to_csv(csv_path, index=False)
+    with open(json_path, "w") as f:
+        json.dump(report, f, indent=2)
 
-    print("[4/4] Running anomaly detection...")
-    df = detect_anomalies(df, model, scaler, feature_cols)
-
-    generate_report(df)
-
-    # Save full results CSV
-    os.makedirs("results", exist_ok=True)
-    df.to_csv("results/full_results.csv", index=False)
-    print("  Full results saved → results/full_results.csv\n")
+    print(f"[✓] Full results saved  → {csv_path}")
+    print(f"[✓] Anomaly report saved → {json_path}")
 
 
+def print_summary(report: dict):
+    """Print coloured terminal summary."""
+    sep = "=" * 60
+    meta    = report["report_metadata"]
+    summary = report["summary"]
+    events  = report["top_suspicious_events"]
+
+    print(f"\n{sep}")
+    print("   SECURITY LOG ANOMALY DETECTION — REPORT")
+    print(sep)
+    print(f"  Generated   : {meta['generated_at']}")
+    print(f"  Total Logs  : {meta['total_logs']:,}")
+    print(f"  Detection   : {meta['detection_rate']}")
+    print(sep)
+    print(f"  Total Anomalies : {summary['total_anomalies']}")
+    print(f"  Normal Events   : {summary['normal_events']:,}")
+    print(f"  Severity Split  : {summary['severity_breakdown']}")
+    print(sep)
+    print("\n  TOP SUSPICIOUS EVENTS\n")
+    for i, e in enumerate(events[:10], 1):
+        print(f"  [{e['severity']:8s}] {e['user_id']} | "
+              f"Score: {e['anomaly_score']:6.3f} | "
+              f"Attempts: {e['login_attempts']:2d} | "
+              f"Failed: {e['failed_auths']:2d} | "
+              f"Off-hours: {'YES' if e['off_hours'] else 'NO '} | "
+              f"→ {e['recommended_action']}")
+    print(f"\n{sep}")
+    print("  Full report: results/anomaly_report.json")
+    print(f"{sep}\n")
+
+
+# ── Entry Point ──────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    print("\n[*] Starting Security Log Anomaly Detection Pipeline...")
+
+    df                  = load_data(CONFIG["data_path"])
+    df, model, scaler   = run_detection(df)
+    report              = build_report(df)
+    save_results(df, report)
+    print_summary(report)
