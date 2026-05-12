@@ -8,9 +8,12 @@
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
 **Author:** Pramod Prakash Jadhav
+
 **GitHub:** [github.com/pramodj551-oss](https://github.com/pramodj551-oss)
+
 **LinkedIn:** [linkedin.com/in/pramod-prakash-jadhav-42ba2281](https://www.linkedin.com/in/pramod-prakash-jadhav-42ba2281)
-**Portfolio:** [[pramodjadhav.vercel.app](https://pramodjadhav.vercel.app)
+
+**Portfolio:** [pramodjadhav.vercel.app](https://pramodjadhav.vercel.app)
 
 ---
 
