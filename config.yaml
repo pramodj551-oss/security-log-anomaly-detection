@@ -1,0 +1,33 @@
+# Security Log Anomaly Detection — Configuration
+# ================================================
+# Author: Pramod Prakash Jadhav
+# Edit these values to tune the model for your environment.
+
+model:
+  contamination: 0.06        # Expected anomaly fraction (6% of logs)
+  n_estimators: 200          # Number of Isolation Forest trees
+  random_state: 42           # Reproducibility seed
+
+paths:
+  data: "data/sample_logs.csv"
+  results_dir: "results"
+  report: "results/anomaly_report.json"
+  full_csv: "results/full_results.csv"
+
+severity_thresholds:
+  # Isolation Forest anomaly scores (more negative = more anomalous)
+  critical: -0.155           # IMMEDIATE action required
+  high: -0.120               # Investigate within 1 hour
+  medium: -0.050             # Flag for daily review
+
+features:
+  # Feature weights for composite risk_score
+  login_attempts_weight: 0.30
+  failed_auths_weight:   0.35
+  unique_ips_weight:     0.20
+  off_hours_weight:      0.15
+
+alerts:
+  critical_action: "IMMEDIATE BLOCK & ESCALATE"
+  high_action:     "INVESTIGATE & MONITOR"
+  medium_action:   "FLAG FOR REVIEW"
