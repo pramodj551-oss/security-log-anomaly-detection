@@ -189,7 +189,7 @@ def color_sev(val):
     return m.get(val,"")
 
 st.dataframe(
-    filtered[show_cols].style.applymap(color_sev, subset=["severity"])
+    filtered[show_cols].style.map(color_sev, subset=["severity"])
     .format({"anomaly_score":"{:.3f}","risk_score":"{:.2f}","data_volume_mb":"{:.1f}"}),
     use_container_width=True, height=400)
 
