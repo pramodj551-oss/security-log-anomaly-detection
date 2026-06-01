@@ -217,11 +217,12 @@ def print_summary(report: dict):
 
 
 # ── Entry Point ──────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     print("\n[*] Starting Security Log Anomaly Detection Pipeline...")
 
-    df                  = load_data(CONFIG = {"data_path": "results/full_results.csv"})
-    df, model, scaler   = run_detection(df)
-    report              = build_report(df)
+    df                = load_data(CONFIG["data_path"])   # "data/sample_logs.csv"
+    df, model, scaler = run_detection(df)
+    report            = build_report(df)
     save_results(df, report)
     print_summary(report)
