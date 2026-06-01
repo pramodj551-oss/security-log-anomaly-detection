@@ -1,4 +1,4 @@
-व"""
+"""
 Security Log Anomaly Detection System
 ======================================
 Author  : Pramod Prakash Jadhav
