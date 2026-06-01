@@ -49,6 +49,47 @@ FEATURE_COLS = [
 ]
 
 
+# ── Data Generation ──────────────────────────────────────────────────────
+def generate_sample_data(path: str, n_records: int = 500):
+    """Generate synthetic access log data for demonstration."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    np.random.seed(42)
+    n_normal  = int(n_records * 0.94)
+    n_anomaly = n_records - n_normal
+
+    # Normal behaviour
+    normal = {
+        "login_attempts"      : np.random.randint(1, 5,    n_normal),
+        "unique_ips"          : np.random.randint(1, 3,    n_normal),
+        "off_hours"           : np.random.randint(0, 2,    n_normal),
+        "failed_auths"        : np.random.randint(0, 2,    n_normal),
+        "data_volume_mb"      : np.random.uniform(1, 50,   n_normal),
+        "session_duration_min": np.random.uniform(5, 60,   n_normal),
+    }
+
+    # Anomalous behaviour
+    anomalous = {
+        "login_attempts"      : np.random.randint(20, 100, n_anomaly),
+        "unique_ips"          : np.random.randint(10, 50,  n_anomaly),
+        "off_hours"           : np.ones(n_anomaly, dtype=int),
+        "failed_auths"        : np.random.randint(15, 80,  n_anomaly),
+        "data_volume_mb"      : np.random.uniform(500, 2000, n_anomaly),
+        "session_duration_min": np.random.uniform(120, 600,  n_anomaly),
+    }
+
+    df_normal  = pd.DataFrame(normal)
+    df_anomaly = pd.DataFrame(anomalous)
+    df         = pd.concat([df_normal, df_anomaly], ignore_index=True).sample(frac=1, random_state=42)
+
+    # Add metadata columns
+    df["user_id"]   = [f"USR{str(i).zfill(4)}" for i in range(len(df))]
+    df["timestamp"] = pd.date_range(start="2024-01-01", periods=len(df), freq="15min")
+
+    df.to_csv(path, index=False)
+    print(f"[✓] Sample data generated → {path}  ({len(df):,} records)")
+
+
 # ── Helper Functions ─────────────────────────────────────────────────────
 def load_data(path: str) -> pd.DataFrame:
     """Load and validate access log CSV."""
@@ -71,10 +112,10 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df["failure_rate"] = df["failed_auths"] / (df["login_attempts"] + 1)
     # risk_score: composite weighted score
     df["risk_score"] = (
-        df["login_attempts"]     * 0.30 +
-        df["failed_auths"]       * 0.35 +
-        df["unique_ips"]         * 0.20 +
-        df["off_hours"]          * 0.15
+        df["login_attempts"] * 0.30 +
+        df["failed_auths"]   * 0.35 +
+        df["unique_ips"]     * 0.20 +
+        df["off_hours"]      * 0.15
     )
     return df
 
@@ -105,13 +146,13 @@ def run_detection(df: pd.DataFrame):
     X = df[all_features].fillna(0)
 
     # Normalise
-    scaler = StandardScaler()
+    scaler   = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
     # Train Isolation Forest
     model = IsolationForest(
         n_estimators  = CONFIG["n_estimators"],
-        contamination = 0.06,
+        contamination = CONFIG["contamination"],
         random_state  = CONFIG["random_state"],
     )
     df["anomaly_flag"]  = model.fit_predict(X_scaled)   # -1 = anomaly, 1 = normal
@@ -126,8 +167,8 @@ def run_detection(df: pd.DataFrame):
 
 def build_report(df: pd.DataFrame) -> dict:
     """Build structured JSON report."""
-    anomalies = df[df["is_anomaly"]].copy()
-    severity_counts = anomalies["severity"].value_counts().to_dict()
+    anomalies        = df[df["is_anomaly"]].copy()
+    severity_counts  = anomalies["severity"].value_counts().to_dict()
 
     events = []
     for _, row in anomalies.iterrows():
@@ -143,8 +184,8 @@ def build_report(df: pd.DataFrame) -> dict:
             "data_volume_mb"    : float(row.get("data_volume_mb", 0)),
             "risk_score"        : round(float(row["risk_score"]), 4),
             "recommended_action": (
-                "IMMEDIATE BLOCK & ESCALATE"  if row["severity"] == "CRITICAL" else
-                "INVESTIGATE & MONITOR"        if row["severity"] == "HIGH"     else
+                "IMMEDIATE BLOCK & ESCALATE" if row["severity"] == "CRITICAL" else
+                "INVESTIGATE & MONITOR"       if row["severity"] == "HIGH"     else
                 "FLAG FOR REVIEW"
             )
         })
@@ -155,15 +196,15 @@ def build_report(df: pd.DataFrame) -> dict:
 
     return {
         "report_metadata": {
-            "generated_at"    : datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "model"           : "IsolationForest",
-            "total_logs"      : len(df),
-            "detection_rate"  : f"{len(anomalies)/len(df)*100:.1f}%",
+            "generated_at"  : datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "model"         : "IsolationForest",
+            "total_logs"    : len(df),
+            "detection_rate": f"{len(anomalies)/len(df)*100:.1f}%",
         },
         "summary": {
-            "total_anomalies" : len(anomalies),
-            "normal_events"   : len(df) - len(anomalies),
-            "severity_breakdown": severity_counts,
+            "total_anomalies"    : len(anomalies),
+            "normal_events"      : len(df) - len(anomalies),
+            "severity_breakdown" : severity_counts,
             "false_positive_rate": "< 5%",
         },
         "top_suspicious_events": events[:20],
@@ -181,14 +222,14 @@ def save_results(df: pd.DataFrame, report: dict):
     with open(json_path, "w") as f:
         json.dump(report, f, indent=2)
 
-    print(f"[✓] Full results saved  → {csv_path}")
+    print(f"[✓] Full results saved   → {csv_path}")
     print(f"[✓] Anomaly report saved → {json_path}")
 
 
 def print_summary(report: dict):
-    """Print coloured terminal summary."""
-    sep = "=" * 60
-    meta    = report["report_metadata"]
+    """Print terminal summary."""
+    sep    = "=" * 60
+    meta   = report["report_metadata"]
     summary = report["summary"]
     events  = report["top_suspicious_events"]
 
@@ -217,11 +258,15 @@ def print_summary(report: dict):
 
 
 # ── Entry Point ──────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     print("\n[*] Starting Security Log Anomaly Detection Pipeline...")
 
-    df                = load_data(CONFIG["data_path"])   # "data/sample_logs.csv"
+    # Auto-generate sample data if not present
+    if not os.path.exists(CONFIG["data_path"]):
+        print("[*] Sample data not found — generating synthetic logs...")
+        generate_sample_data(CONFIG["data_path"])
+
+    df                = load_data(CONFIG["data_path"])
     df, model, scaler = run_detection(df)
     report            = build_report(df)
     save_results(df, report)
