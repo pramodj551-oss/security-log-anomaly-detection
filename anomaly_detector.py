@@ -1,4 +1,4 @@
-"""
+व"""
 Security Log Anomaly Detection System
 ======================================
 Author  : Pramod Prakash Jadhav
@@ -220,7 +220,7 @@ def print_summary(report: dict):
 if __name__ == "__main__":
     print("\n[*] Starting Security Log Anomaly Detection Pipeline...")
 
-    df                  = load_data(CONFIG["data_path": "full_results.csv"])
+    df                  = load_data(CONFIG.get("data_path", "full_results.csv"))
     df, model, scaler   = run_detection(df)
     report              = build_report(df)
     save_results(df, report)
